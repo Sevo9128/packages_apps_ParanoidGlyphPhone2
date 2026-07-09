@@ -45,33 +45,10 @@ java_defaults {
 }
 
 android_app {
-    name: "ParanoidGlyphPhone1",
-    defaults: ["ParanoidGlyph_defaults"],
-    asset_dirs: ["phone1/assets"],
-    resource_dirs: ["phone1/res"],
-}
-
-android_app {
     name: "ParanoidGlyphPhone2",
     defaults: ["ParanoidGlyph_defaults"],
     asset_dirs: ["phone2/assets"],
     resource_dirs: ["phone2/res"],
-
-}
-
-android_app {
-    name: "ParanoidGlyphPhone2a",
-    defaults: ["ParanoidGlyph_defaults"],
-    asset_dirs: ["phone2a/assets"],
-    resource_dirs: ["phone2a/res"],
-}
-
-android_app {
-    name: "ParanoidGlyphPhone3a",
-    defaults: ["ParanoidGlyph_defaults"],
-    asset_dirs: ["phone3a/assets"],
-    resource_dirs: ["phone3a/res"],
-    required: ["ParanoidGlyphPhone3aProRes"],
 }
 
 prebuilt_etc {
