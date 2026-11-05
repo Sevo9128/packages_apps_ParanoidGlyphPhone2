@@ -18,19 +18,24 @@ package co.aospa.glyph.Manager;
 
 import android.app.ActivityManager;
 import android.content.Context;
-import android.content.ContentResolver;
+import android.content.SharedPreferences;
 import android.media.AudioManager;
 import android.provider.Settings;
-import android.util.Log;
 
 import androidx.preference.PreferenceManager;
 
 import com.android.internal.util.ArrayUtils;
 
+import java.io.File;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import co.aospa.glyph.Constants.Constants;
+import co.aospa.glyph.Data;
 import co.aospa.glyph.Utils.FileUtils;
 import co.aospa.glyph.Utils.ResourceUtils;
 
@@ -48,6 +53,14 @@ public final class SettingsManager {
             context = Constants.CONTEXT;
         }
         return context;
+    }
+
+    public static String buildAppNotifsPrefName(String pkg) {
+        return Constants.GLYPH_NOTIF_APP_PREF_PREFIX + pkg;
+    }
+
+    public static String buildAppChannelPrefName(String pkg, String channelId) {
+        return buildAppNotifsPrefName(pkg) + "_" + channelId;
     }
 
     public static boolean enableGlyph(boolean enable) {
@@ -365,13 +378,6 @@ public final class SettingsManager {
                 .getBoolean(Constants.GLYPH_NOTIFS_REVERSE_ANIMATION_ENABLE, false);
     }
 
-    public static boolean isGlyphNotifsAppEssential(String app) {
-        Context ctx = getContext();
-        Set<String> selectedValues = PreferenceManager.getDefaultSharedPreferences(ctx)
-                .getStringSet(Constants.GLYPH_NOTIFS_SUB_ESSENTIAL , new HashSet<String>());
-        return selectedValues.contains(app) && isGlyphNotifsEnabled();
-    }
-
     public static boolean isGlyphAutoBrightnessEnabled() {
         Context ctx = getContext();
         return !ResourceUtils.getString("glyph_light_sensor").isBlank() 
@@ -430,6 +436,172 @@ public final class SettingsManager {
         int currentUser = ActivityManager.getCurrentUser();
         Settings.Secure.putIntForUser(ctx.getContentResolver(),
                 key, state ? 1 : 0, currentUser);
+    }
+
+    public static class Notification {
+        public static void setChannelAnimationEnabled(boolean state, String pkg, String channelId) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(buildAppChannelPrefName(pkg, channelId), Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(Constants.GLYPH_NOTIFS_SUB_ENABLE, state)
+                    .commit();
+        }
+
+        public static boolean isChannelAnimationEnabled(String pkg, String channelId) {
+            Context ctx = getContext();
+            return ctx.getSharedPreferences(buildAppChannelPrefName(pkg, channelId),
+                            Context.MODE_PRIVATE)
+                    .getBoolean(Constants.GLYPH_NOTIFS_SUB_ENABLE, true);
+        }
+
+        public static boolean isChannelAnimationReversed(String pkg, String channelId) {
+            Context ctx = getContext();
+            return ctx.getSharedPreferences(buildAppChannelPrefName(pkg, channelId),
+                            Context.MODE_PRIVATE)
+                    .getBoolean(Constants.GLYPH_NOTIFS_REVERSE_ANIMATION_ENABLE, false);
+        }
+
+        public static String getChannelAnimation(String pkg, String channelId) {
+            Context ctx = getContext();
+            return ctx.getSharedPreferences(buildAppChannelPrefName(pkg, channelId),
+                            Context.MODE_PRIVATE)
+                    .getString(Constants.GLYPH_NOTIFS_SUB_ANIMATIONS,
+                            getGlyphNotifsAnimation(pkg));
+        }
+
+        public static void setGlobalAppAnimationEnabled(String pkg, boolean state) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(buildAppNotifsPrefName(pkg), Context.MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(Constants.GLYPH_NOTIFS_APP_GLOBAL_ANIMATION_ENABLE, state)
+                    .commit();
+        }
+
+        public static boolean isGlobalAppAnimationEnabled(String pkg) {
+            Context ctx = getContext();
+            return ctx.getSharedPreferences(buildAppNotifsPrefName(pkg), Context.MODE_PRIVATE)
+                    .getBoolean(Constants.GLYPH_NOTIFS_APP_GLOBAL_ANIMATION_ENABLE, true);
+        }
+
+        public static boolean channelNotifsConfigExists(String pkg, String channelId) {
+            Context ctx = getContext();
+            return !ctx.getSharedPreferences(buildAppChannelPrefName(pkg, channelId), Context.MODE_PRIVATE)
+                    .getAll().isEmpty();
+        }
+
+        public static boolean channelHasGlyphNotifsConfig(String pkg, String channelId) {
+            Context ctx = getContext();
+            return !ctx.getSharedPreferences(
+                            buildAppChannelPrefName(pkg, channelId), Context.MODE_PRIVATE)
+                    .getAll().isEmpty()
+                    || isChannelAnimationReversed(pkg, channelId)
+                    || !getChannelAnimation(pkg, channelId).equals(getGlyphNotifsAnimation());
+        }
+
+        public static boolean channelHasGlyphNotifsConfig(String pkg, String channelId, String comp) {
+            Context ctx = getContext();
+            return !ctx.getSharedPreferences(
+                    buildAppChannelPrefName(pkg, channelId), Context.MODE_PRIVATE)
+                    .getAll().isEmpty()
+                    || isChannelAnimationReversed(pkg, channelId)
+                    || !getChannelAnimation(pkg, channelId).equals(comp);
+        }
+    }
+
+    public static class Essential {
+
+        public static boolean deleteRule(String ruleId) {
+            Context ctx = getContext();
+            return ctx.deleteSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId);
+        }
+
+        public static Data.EssentialRule getRule(String ruleId) {
+            Context ctx = getContext();
+            Map<String, ?> rulePref = ctx.getSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId,
+                    Context.MODE_PRIVATE).getAll();
+
+            if (!rulePref.isEmpty()) {
+                String ruleName = null;
+                HashSet<String> packages = new HashSet<>();
+                HashSet<String> keywords = new HashSet<>();
+                for (String key : rulePref.keySet()) {
+                    Object value = rulePref.get(key);
+                    switch (key) {
+                        case Constants.Essential.GLYPH_ESSENTIAL_RULE_NAME -> ruleName = (String) value;
+                        case Constants.Essential.GLYPH_ESSENTIAL_RULE_KEYWORDS -> keywords.addAll((Set) value);
+                        case Constants.Essential.GLYPH_ESSENTIAL_RULE_PACKAGES -> packages.addAll((Set) value);
+                    }
+                }
+                return new Data.EssentialRule(ruleName, ruleId, packages, keywords);
+            }
+            return null;
+        }
+
+        public static List<Data.EssentialRule> getRules() {
+            Context ctx = getContext();
+            List<String> names = findSharedPreferenceNames(ctx, Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX);
+            if (names.isEmpty()) return Collections.emptyList();
+
+            String prefix = Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX;
+            List<Data.EssentialRule> rules = new ArrayList<>();
+
+            for (String n : names) {
+                String ruleId = n.substring(prefix.length());
+                Data.EssentialRule rule = getRule(ruleId);
+                if (rule != null) rules.add(rule);
+            }
+            return rules;
+        }
+
+        public static void setRuleName(String ruleId, String name) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId
+                            , Context.MODE_PRIVATE)
+                    .edit()
+                    .putString(Constants.Essential.GLYPH_ESSENTIAL_RULE_NAME, name)
+                    .apply();
+        }
+
+        public static void setKeywords(String ruleId, Set<String> keywords) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId
+                                , Context.MODE_PRIVATE)
+                        .edit()
+                        .putStringSet(Constants.Essential.GLYPH_ESSENTIAL_RULE_KEYWORDS, keywords)
+                        .apply();
+        }
+
+        public static void setPackages(String ruleId, Set<String> packages) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId
+                            , Context.MODE_PRIVATE)
+                    .edit()
+                    .putStringSet(Constants.Essential.GLYPH_ESSENTIAL_RULE_PACKAGES, packages)
+                    .apply();
+        }
+
+        public static void setContacts(String ruleId, Set<String> contacts) {
+            Context ctx = getContext();
+            ctx.getSharedPreferences(Constants.Essential.GLYPH_ESSENTIAL_RULE_PREFIX + ruleId
+                            , Context.MODE_PRIVATE)
+                    .edit()
+                    .putStringSet(Constants.Essential.GLYPH_ESSENTIAL_RULE_CONTACTS, contacts)
+                    .apply();
+        }
+
+    }
+
+    private static List<String> findSharedPreferenceNames(Context ctx, String prefix) {
+        File dir = new File(ctx.getApplicationInfo().dataDir, "shared_prefs");
+        File[] files = dir.listFiles((d, n) -> n.endsWith(".xml") && n.startsWith(prefix));
+        List<String> names = new ArrayList<>();
+        if (files != null) {
+            for (File f : files) {
+                names.add(f.getName().substring(0, f.getName().length() - 4));
+            }
+        }
+        Collections.sort(names);
+        return names;
     }
 
 

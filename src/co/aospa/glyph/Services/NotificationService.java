@@ -16,19 +16,29 @@
 
 package co.aospa.glyph.Services;
 
+import android.app.INotificationManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
+import android.app.NotificationChannelGroup;
 import android.app.NotificationManager;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.PackageManager;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ParceledListSlice;
 import android.database.ContentObserver;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.Parcelable;
+import android.os.Process;
+import android.os.RemoteException;
+import android.os.ServiceManager;
+import android.os.UserHandle;
 import android.preference.PreferenceManager;
 import android.provider.Settings;
 import android.service.notification.NotificationListenerService;
@@ -37,13 +47,18 @@ import android.util.Log;
 
 import com.android.internal.util.ArrayUtils;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
 import co.aospa.glyph.Constants.Constants;
+import co.aospa.glyph.Data;
 import co.aospa.glyph.Manager.AnimationManager;
 import co.aospa.glyph.Manager.SettingsManager;
 import co.aospa.glyph.Utils.AnimationUtils;
@@ -70,7 +85,55 @@ public class NotificationService extends NotificationListenerService
     private final Map<String, Future<?>> pendingFutures = new HashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool();
 
+    private ObservableSet<String> essentials = new ObservableSet<>();
+
     private int SYNC_DELAY = 345;
+
+    public static class ObservableSet<T> extends LinkedHashSet<T> {
+        public interface Listener {
+            void onChanged(int size);
+        }
+
+        private Listener listener;
+
+        public void setListener(Listener l) {
+            listener = l;
+        }
+
+        private void notifyChanged() {
+            if (listener != null) listener.onChanged(size());
+        }
+
+        @Override
+        public boolean add(T t) {
+            boolean r = super.add(t);
+            if (r) notifyChanged();
+            return r;
+        }
+
+        @Override
+        public boolean remove(Object o) {
+            boolean r = super.remove(o);
+            if (r) notifyChanged();
+            return r;
+        }
+
+        @Override
+        public void clear() {
+            boolean wasEmpty = isEmpty();
+            super.clear();
+            if (!wasEmpty) notifyChanged();
+        }
+
+        @Override
+        public boolean addAll(Collection<? extends T> c) {
+            boolean changed = false;
+            for (T t : c) changed |= super.add(t);
+            if (changed) notifyChanged();
+            return changed;
+        }
+    }
+
 
     @Override
     public void onCreate() {
@@ -89,6 +152,13 @@ public class NotificationService extends NotificationListenerService
         mSettingObserver.register(mContentResolver);
         mSharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
         mSharedPreferences.registerOnSharedPreferenceChangeListener(this);
+        essentials.setListener(size -> {
+            if (size > 0) {
+                AnimationManager.playEssential();
+            } else {
+                AnimationManager.stopEssential();
+            }
+        });
         super.onCreate();
     }
 
@@ -105,6 +175,7 @@ public class NotificationService extends NotificationListenerService
         AnimationManager.stopEssential();
         mSharedPreferences.unregisterOnSharedPreferenceChangeListener(this);
         mSettingObserver.unregister(mContentResolver);
+        essentials.setListener(null);
         thread.quit();
         super.onDestroy();
     }
@@ -153,66 +224,158 @@ public class NotificationService extends NotificationListenerService
                 + " | channel id: " + packageChannelID
                 + " | importance: " + packageImportance
                 + " | can bypass dnd: " + packageCanBypassDnd);
-        
-        if (SettingsManager.isGlyphNotifsEnabled(packageName)
-                        && !sbn.isOngoing() 
-                        && !ArrayUtils.contains(Constants.APPS_TO_IGNORE, packageName)
-                        && !ArrayUtils.contains(Constants.NOTIFS_TO_IGNORE, packageName + ":" + packageChannelID)
-                        && (packageImportance >= NotificationManager.IMPORTANCE_DEFAULT || packageImportance == -1)
-                        && (interruptionFilter <= NotificationManager.INTERRUPTION_FILTER_ALL || packageCanBypassDnd)) {
+
+        if (shouldPlayGlyph(sbn, packageName, packageChannelID,
+                packageImportance, interruptionFilter, packageCanBypassDnd)) {
             String notifKey = sbn.getKey();
-            Runnable runnable = () -> {
-                if (SettingsManager.appHasGlyphNotifsConfig(packageName)) {
-                    if (SettingsManager.isGlyphNotifsAnimationReversed(packageName)) {
-                        AnimationManager.playCsvReverse(
-                                mContext,
-                                SettingsManager.getGlyphNotifsAnimation(packageName))
-                        ;
-                    } else {
-                        AnimationManager.playCsv(
-                                mContext,
-                                SettingsManager.getGlyphNotifsAnimation(packageName)
-                        );
-                    }
-                } else {
-                    if (SettingsManager.isGlyphNotifsSyncEnabled()
-                            && AnimationUtils.Holder.Notification.isAvailable()) {
-                        AnimationManager.playExternalCsv(
-                                AnimationUtils.Holder.Notification.getCsv(),
-                                "notification"
-                        );
-                    } else {
-                        if (SettingsManager.isGlyphNotifsAnimationReversed()) {
-                            AnimationManager.playCsvReverse(
-                                    mContext,
-                                    SettingsManager.getGlyphNotifsAnimation()
-                            );
-                        } else {
-                            AnimationManager.playCsv(
-                                    mContext,
-                                    SettingsManager.getGlyphNotifsAnimation()
-                            );
-                        }
-                    }
-                }
-            };
+            Runnable runnable = () -> playNotificationGlyph(packageName, packageChannelID);
+
             pendingCallbacks.put(notifKey, runnable);
             mThreadHandler.postDelayed(() -> {
-                Future<?> future = executor.submit(runnable);
-                pendingFutures.put(notifKey, future);
+                pendingFutures.put(notifKey, executor.submit(runnable));
             }, SYNC_DELAY);
         }
         
-        if (SettingsManager.isGlyphNotifsAppEssential(packageName)
+        if (SettingsManager.isGlyphNotifsEnabled(packageName)
+                && !Data.EssentialRule.getMatchingRules(new Data.EssentialRule.RuleContext(
+                        packageName, getAllText(sbn))).isEmpty()
                         && !sbn.isOngoing()
-                        && !ArrayUtils.contains(Constants.APPS_TO_IGNORE, packageName)
-                        && !ArrayUtils.contains(Constants.NOTIFS_TO_IGNORE, packageName + ":" + packageChannelID)
-                        && (packageImportance >= NotificationManager.IMPORTANCE_DEFAULT || packageImportance == -1)
-                        && (interruptionFilter <= NotificationManager.INTERRUPTION_FILTER_ALL || packageCanBypassDnd)
+                        && !isIgnored(packageName, packageChannelID)
+                        && isImportantEnough(packageImportance)
+                        && isAllowedByDnd(interruptionFilter, packageCanBypassDnd)
                         && mNotificationManager.isNotificationPolicyAccessGranted()) {
-            AnimationManager.playEssential();
+           essentials.add(sbn.getKey());
         }
     }
+
+    private boolean shouldPlayGlyph(StatusBarNotification sbn, String packageName,
+                                    String packageChannelID, int packageImportance,
+                                    int interruptionFilter, boolean packageCanBypassDnd) {
+        if (!SettingsManager.isGlyphNotifsEnabled(packageName) || sbn.isOngoing()) return false;
+        if (isIgnored(packageName, packageChannelID)) return false;
+        return isImportantEnough(packageImportance)
+                && isAllowedByDnd(interruptionFilter, packageCanBypassDnd);
+    }
+
+    private boolean isIgnored(String packageName, String channelId) {
+        return ArrayUtils.contains(Constants.APPS_TO_IGNORE, packageName)
+                || ArrayUtils.contains(Constants.NOTIFS_TO_IGNORE, packageName + ":" + channelId);
+    }
+
+    private boolean isImportantEnough(int importance) {
+        return importance == -1 || importance >= NotificationManager.IMPORTANCE_DEFAULT;
+    }
+
+    private boolean isAllowedByDnd(int interruptionFilter, boolean canBypassDnd) {
+        return interruptionFilter <= NotificationManager.INTERRUPTION_FILTER_ALL || canBypassDnd;
+    }
+
+    private void playNotificationGlyph(String packageName, String channelId) {
+        if (SettingsManager.appHasGlyphNotifsConfig(packageName)) {
+            playAppConfigured(packageName, channelId);
+        } else {
+            playDefault();
+        }
+    }
+
+    private void playAppConfigured(String packageName, String channelId) {
+        if (SettingsManager.Notification.isGlobalAppAnimationEnabled(packageName)) {
+            playAnimation(
+                    SettingsManager.getGlyphNotifsAnimation(packageName),
+                    SettingsManager.isGlyphNotifsAnimationReversed(packageName));
+            return;
+        }
+        if (!SettingsManager.Notification.channelHasGlyphNotifsConfig(packageName, channelId)
+                || !SettingsManager.Notification.isChannelAnimationEnabled(packageName, channelId)) {
+            return;
+        }
+        playAnimation(
+                SettingsManager.Notification.getChannelAnimation(packageName, channelId),
+                SettingsManager.Notification.isChannelAnimationReversed(packageName, channelId));
+    }
+
+    private void playDefault() {
+        if (SettingsManager.isGlyphNotifsSyncEnabled()
+                && AnimationUtils.Holder.Notification.isAvailable()) {
+            AnimationManager.playExternalCsv(
+                    AnimationUtils.Holder.Notification.getCsv(), "notification");
+            return;
+        }
+        playAnimation(
+                SettingsManager.getGlyphNotifsAnimation(),
+                SettingsManager.isGlyphNotifsAnimationReversed());
+    }
+
+    private void playAnimation(String animation, boolean reversed) {
+        if (reversed) {
+            AnimationManager.playCsvReverse(mContext, animation);
+        } else {
+            AnimationManager.playCsv(mContext, animation);
+        }
+    }
+
+    private static INotificationManager getNm() {
+        return INotificationManager.Stub.asInterface(
+                ServiceManager.getService(Context.NOTIFICATION_SERVICE));
+    }
+
+    private  static void loadChannels(Context ctx, String pkg) {
+        try {
+            int uid = ctx.getPackageManager().getApplicationInfo(pkg, 0).uid;
+            INotificationManager nm = getNm();
+
+            ParceledListSlice<NotificationChannel> chSlice =
+                    nm.getNotificationChannelsForPackage(pkg, uid, false);
+            ParceledListSlice<NotificationChannelGroup> grpSlice =
+                    nm.getNotificationChannelGroupsForPackage(pkg, uid, false);
+
+            List<NotificationChannel> channels =
+                    chSlice != null ? chSlice.getList() : Collections.emptyList();
+            List<NotificationChannelGroup> groups =
+                    grpSlice != null ? grpSlice.getList() : Collections.emptyList();
+
+            Data.ApplicationData.Notification.setData(ctx, pkg, channels, groups);
+        } catch (RemoteException | PackageManager.NameNotFoundException | SecurityException e) {
+            Log.w(TAG, "Channel query failed for " + pkg, e);
+        }
+    }
+
+    @Override
+    public void onListenerConnected() {
+        for (ApplicationInfo app : getPackageManager().getInstalledApplications(0)) {
+            String pkg = app.packageName;
+            loadChannels(getApplicationContext(), pkg);
+        }
+    }
+
+    @Override
+    public void onNotificationChannelModified(String pkg, UserHandle user,
+                                              NotificationChannel channel, int modificationType) {
+        if (!Process.myUserHandle().equals(user)) return;
+        switch (modificationType) {
+            case NOTIFICATION_CHANNEL_OR_GROUP_ADDED, NOTIFICATION_CHANNEL_OR_GROUP_UPDATED -> {
+                Data.ApplicationData.Notification.updateChannel(getApplicationContext(), pkg, channel);
+            }
+            case NOTIFICATION_CHANNEL_OR_GROUP_DELETED -> {
+                Data.ApplicationData.Notification.removeChannel(getApplicationContext(), pkg, channel);
+            }
+        }
+    }
+
+    @Override
+    public void onNotificationChannelGroupModified(String pkg, UserHandle user,
+                                                   NotificationChannelGroup group, int modificationType) {
+        if (!Process.myUserHandle().equals(user)) return;
+        switch (modificationType) {
+            case NOTIFICATION_CHANNEL_OR_GROUP_ADDED -> {
+                Data.ApplicationData.Notification.addChannelGroup(getApplicationContext(), pkg, group);
+            }
+            case NOTIFICATION_CHANNEL_OR_GROUP_DELETED -> {
+                Data.ApplicationData.Notification.removeChannelGroup(getApplicationContext(), pkg, group);
+            }
+        }
+    }
+
 
     private boolean hasProgressBar(Notification notification) {
         if (notification == null || notification.extras == null) return false;
@@ -300,6 +463,8 @@ public class NotificationService extends NotificationListenerService
 
         Future<?> future = pendingFutures.remove(key);
         if (future != null) future.cancel(true);
+
+        essentials.remove(sbn.getKey());
         
         onNotificationUpdated();
     }
@@ -337,22 +502,58 @@ public class NotificationService extends NotificationListenerService
                         + " | channel id: " + packageChannelID
                         + " | importance: " + packageImportance
                         + " | can bypass dnd: " + packageCanBypassDnd);
-                if (SettingsManager.isGlyphNotifsAppEssential(packageName)
-                                && !sbn.isOngoing()
-                                && !ArrayUtils.contains(Constants.APPS_TO_IGNORE, packageName)
-                                && !ArrayUtils.contains(Constants.NOTIFS_TO_IGNORE, packageName + ":" + packageChannelID)
-                                && (packageImportance >= NotificationManager.IMPORTANCE_DEFAULT || packageImportance == -1)
-                                && (interruptionFilter <= NotificationManager.INTERRUPTION_FILTER_ALL || packageCanBypassDnd)) {
+                if (!Data.EssentialRule.getMatchingRules(new Data.EssentialRule.RuleContext(
+                        packageName, getAllText(sbn))).isEmpty()
+                                && !sbn.isOngoing() && !isIgnored(packageName, packageChannelID)
+                                && isImportantEnough(packageImportance)
+                                && isAllowedByDnd(interruptionFilter, packageCanBypassDnd)) {
                     if (DEBUG) Log.d(TAG, "onNotificationUpdated: found essential notification | package:" + packageName);
-                    playEssential = true;
+                    essentials.add(sbn.getKey());
                 }
             }
         }
-        if (playEssential) {
-            AnimationManager.playEssential();
-        } else {
-            AnimationManager.stopEssential();
+    }
+
+    private String getAllText(StatusBarNotification sbn) {
+        Bundle extras = sbn.getNotification().extras;
+        StringBuilder sb = new StringBuilder();
+
+        appendIfPresent(sb, extras.getCharSequence(Notification.EXTRA_TITLE));
+        appendIfPresent(sb, extras.getCharSequence(Notification.EXTRA_TEXT));
+        appendIfPresent(sb, extras.getCharSequence(Notification.EXTRA_SUB_TEXT));
+        appendIfPresent(sb, extras.getCharSequence(Notification.EXTRA_BIG_TEXT));
+
+        CharSequence[] lines = extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES);
+        if (lines != null) {
+            for (CharSequence line : lines) {
+                appendIfPresent(sb, line);
+            }
         }
+
+        Parcelable[] messages = extras.getParcelableArray(Notification.EXTRA_MESSAGES);
+        if (messages != null) {
+            for (Parcelable p : messages) {
+                if (!(p instanceof Bundle)) continue;
+                Bundle b = (Bundle) p;
+                CharSequence sender = b.getCharSequence("sender");
+                CharSequence text = b.getCharSequence("text");
+                if (text == null || text.isEmpty()) continue;
+
+                if (sender != null && !sender.isEmpty()) {
+                    appendIfPresent(sb, sender + ": " + text);
+                } else {
+                    appendIfPresent(sb, text);
+                }
+            }
+        }
+
+        return sb.toString();
+    }
+
+    private void appendIfPresent(StringBuilder sb, CharSequence cs) {
+        if (cs == null || cs.length() == 0) return;
+        if (sb.length() > 0) sb.append('\n');
+        sb.append(cs);
     }
 
     private class SettingObserver extends ContentObserver {

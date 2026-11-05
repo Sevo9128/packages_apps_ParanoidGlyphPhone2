@@ -18,7 +18,6 @@
 
 package co.aospa.glyph.Settings;
 
-import android.Manifest;
 import android.content.BroadcastReceiver;
 import android.content.ContentResolver;
 import android.content.Context;
@@ -37,7 +36,6 @@ import androidx.preference.ListPreference;
 import androidx.preference.Preference;
 import androidx.preference.Preference.OnPreferenceChangeListener;
 import androidx.preference.PreferenceCategory;
-import androidx.preference.PreferenceGroup;
 import androidx.preference.SwitchPreferenceCompat;
 import androidx.preference.TwoStatePreference;
 
@@ -46,10 +44,10 @@ import com.android.settingslib.widget.MainSwitchPreference;
 import com.android.settingslib.widget.SettingsBasePreferenceFragment;
 import com.android.settingslib.widget.SliderPreference;
 
-import android.util.Log;
 import android.widget.CompoundButton;
 import android.widget.CompoundButton.OnCheckedChangeListener;
 
+import co.aospa.glyph.Data.ApplicationData;
 import co.aospa.glyph.Manager.AnimationManager;
 import co.aospa.glyph.Manager.StatusManager;
 import co.aospa.glyph.R;
@@ -60,11 +58,12 @@ import co.aospa.glyph.Services.BatterySaverService;
 import static co.aospa.glyph.Utils.InterfaceUtils.showDialog;
 
 import java.io.File;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
 import co.aospa.glyph.Utils.FileUtils;
+import co.aospa.glyph.Utils.InterfaceUtils;
 import co.aospa.glyph.Utils.ResourceUtils;
 import co.aospa.glyph.Utils.ServiceUtils;
 
@@ -111,14 +110,6 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
 
     private Context context;
 
-    String[] mediaPermissions = {
-            Manifest.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK
-    };
-
-    String[] micPermissions = {
-            Manifest.permission.RECORD_AUDIO
-    };
-
     private BroadcastReceiver mScheduleUpdateReceiver = new BroadcastReceiver() {
         @Override
         public void onReceive(Context context, Intent intent) {
@@ -127,6 +118,9 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
             }
         }
     };
+
+    private Map<String, ApplicationData> mediaData;
+    private Map<String, ApplicationData> micData;
 
     @Override
     public void onCreatePreferences(Bundle savedInstanceState, String rootKey) {
@@ -201,30 +195,36 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
         mCallPreference.setSwitchEnabled(glyphEnabled);
         mCallPreference.setOnPreferenceChangeListener(this);
 
+        boolean chargingSupported = !Constants.Device.isPhone2a();
         mChargingCategory = (PreferenceCategory) findPreference(Constants.GLYPH_CHARGING_CATEGORY);
-        mChargingLevelPreference = (SwitchPreferenceCompat)
-                findPreference(Constants.GLYPH_CHARGING_LEVEL_ENABLE);
+        mChargingCategory.setVisible(chargingSupported);
 
-        mChargingLevelPreference.setEnabled(glyphEnabled);
-        mChargingLevelPreference.setOnPreferenceChangeListener(this);
+        if (chargingSupported) {
+            mChargingLevelPreference = (SwitchPreferenceCompat)
+                    findPreference(Constants.GLYPH_CHARGING_LEVEL_ENABLE);
 
-        mChargingCategory.setVisible(!Constants.Device.isPhone2a());
+            mChargingLevelPreference.setEnabled(glyphEnabled);
+            mChargingLevelPreference.setOnPreferenceChangeListener(this);
 
-        mChargingPowersharePreference = (SwitchPreferenceCompat) findPreference(Constants.GLYPH_CHARGING_POWERSHARE_ENABLE);
+            mChargingPowersharePreference = (SwitchPreferenceCompat) findPreference(Constants.GLYPH_CHARGING_POWERSHARE_ENABLE);
 
-        if (Constants.isPowershareSupported()) {
-           mChargingPowersharePreference.setEnabled(glyphEnabled);
-           mChargingPowersharePreference.setOnPreferenceChangeListener(this);
-        } else {
-           mChargingPowersharePreference.setVisible(false);
+            if (Constants.isPowershareSupported()) {
+                mChargingPowersharePreference.setEnabled(glyphEnabled);
+                mChargingPowersharePreference.setOnPreferenceChangeListener(this);
+            } else {
+                mChargingPowersharePreference.setVisible(false);
+            }
         }
 
         mVolumeCategory = findPreference(Constants.GLYPH_VOLUME_CATEGORY);
-        mVolumeCategory.setVisible(!Constants.Device.isPhone1());
+        boolean volumeSupported = !Constants.Device.isPhone1();
+        mVolumeCategory.setVisible(volumeSupported);
 
-        mVolumeLevelPreference = (SwitchPreferenceCompat) findPreference(Constants.GLYPH_VOLUME_LEVEL_ENABLE);
-        mVolumeLevelPreference.setEnabled(glyphEnabled);
-        mVolumeLevelPreference.setOnPreferenceChangeListener(this);
+        if (volumeSupported) {
+            mVolumeLevelPreference = (SwitchPreferenceCompat) findPreference(Constants.GLYPH_VOLUME_LEVEL_ENABLE);
+            mVolumeLevelPreference.setEnabled(glyphEnabled);
+            mVolumeLevelPreference.setOnPreferenceChangeListener(this);
+        }
 
         mMusicVisualizerPreference = (SwitchPreferenceCompat) findPreference(Constants.GLYPH_MUSIC_VISUALIZER_ENABLE);
         mMusicVisualizerPreference.setEnabled(glyphEnabled);
@@ -250,29 +250,39 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
         mProgressMediaPreference.setOnPreferenceChangeListener(this);
 
         mProgressMediaWhitelistPreference = findPreference(Constants.GLYPH_PROGRESS_MEDIA_WHITELIST);
-        mProgressMediaWhitelistPreference.setEntries(
-                ResourceUtils.getApplicationsWithPermission(true, mediaPermissions));
+
+        mediaData = ApplicationData.getMediaApps(context.getApplicationContext());
+        mProgressMediaWhitelistPreference.setEntries(mediaData.values().stream()
+                .map(ApplicationData::label)
+                .toArray(CharSequence[]::new));
+
         mProgressMediaWhitelistPreference.setEntryValues(
-                ResourceUtils.getApplicationsWithPermission(false, mediaPermissions));
+                mediaData.keySet().toArray(CharSequence[]::new));
 
+        boolean redLedSupported = (Constants.Device.isPhone2() || Constants.Device.isPhone1());
         mRedLedCategory = findPreference(Constants.GLYPH_RED_LED_CATEGORY);
-        mRedLedCategory.setVisible(Constants.Device.isPhone2() || Constants.Device.isPhone1());
+        mRedLedCategory.setVisible(redLedSupported);
 
-        mMicActivityPreference = findPreference(Constants.GLYPH_MIC_ACTIVITY_ENABLE);
-        mMicActivityPreference.setOnPreferenceChangeListener(this);
-        mMicActivityPreference.setEnabled(glyphEnabled);
+        if (redLedSupported) {
+            mMicActivityPreference = findPreference(Constants.GLYPH_MIC_ACTIVITY_ENABLE);
+            mMicActivityPreference.setOnPreferenceChangeListener(this);
+            mMicActivityPreference.setEnabled(glyphEnabled);
 
-        mMicActivityWhitelistPreference = findPreference(Constants.GLYPH_MIC_ACTIVITY_WHITELIST);
-        mMicActivityWhitelistPreference.setEntries(
-                ResourceUtils.getApplicationsWithPermission(true, micPermissions));
-        mMicActivityWhitelistPreference.setEntryValues(
-                ResourceUtils.getApplicationsWithPermission(false, micPermissions));
-        mMicActivityWhitelistPreference.setOnPreferenceChangeListener(this);
-        mMicActivityWhitelistPreference.setEnabled(glyphEnabled);
+            mMicActivityWhitelistPreference = findPreference(Constants.GLYPH_MIC_ACTIVITY_WHITELIST);
 
-        mRedLedModePreference = findPreference(Constants.GLYPH_RED_LED_MODE);
-        mRedLedModePreference.setOnPreferenceChangeListener(this);
-        mRedLedModePreference.setEnabled(glyphEnabled);
+            micData = ApplicationData.getMicApps(context.getApplicationContext());
+            mMicActivityWhitelistPreference.setEntries(micData.values().stream()
+                    .map(ApplicationData::label)
+                    .toArray(CharSequence[]::new));
+
+            mMicActivityWhitelistPreference.setEntryValues(micData.keySet().toArray(CharSequence[]::new));
+            mMicActivityWhitelistPreference.setOnPreferenceChangeListener(this);
+            mMicActivityWhitelistPreference.setEnabled(glyphEnabled);
+
+            mRedLedModePreference = findPreference(Constants.GLYPH_RED_LED_MODE);
+            mRedLedModePreference.setOnPreferenceChangeListener(this);
+            mRedLedModePreference.setEnabled(glyphEnabled);
+        }
 
         mUtilitiesPreference = findPreference(Constants.GLYPH_UTILITIES);
 
@@ -366,23 +376,11 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
         return true;
     }
 
-    private List<Preference> getAllPreferences(PreferenceGroup group) {
-        List<Preference> preferences = new ArrayList<>();
-        for (int i = 0; i < group.getPreferenceCount(); i++) {
-            Preference pref = group.getPreference(i);
-            preferences.add(pref);
-            if (pref instanceof PreferenceGroup) {
-                preferences.addAll(getAllPreferences((PreferenceGroup) pref));
-            }
-        }
-        return preferences;
-    }
-
     @Override
     public void onCheckedChanged(CompoundButton buttonView, boolean isChecked) {
         SettingsManager.enableGlyph(isChecked);
 
-        List<Preference> allPrefs = getAllPreferences(getPreferenceScreen());
+        List<Preference> allPrefs = InterfaceUtils.Preferences.getAllPreferences(getPreferenceScreen());
 
         for (Preference pref : allPrefs) {
 
@@ -430,7 +428,8 @@ public class SettingsFragment extends SettingsBasePreferenceFragment implements 
 
     @Override
     public boolean onPreferenceTreeClick(Preference preference) {
-        if (Constants.GLYPH_NOTIFS_ENABLE.equals(preference.getKey())) {
+        if (Constants.GLYPH_NOTIFS_ENABLE.equals(preference.getKey())
+                || Constants.Essential.GLYPH_ESSENTIAL_NOTIFICATIONS.equals(preference.getKey())) {
             if (!checkNotificationService(true, preference, true)) return true;
         }
         return super.onPreferenceTreeClick(preference);
